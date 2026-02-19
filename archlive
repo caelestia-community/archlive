@@ -891,9 +891,10 @@ repo() {
 
                 rm -Rf "${PKGBUILD_DIR:?}"/"${_package}"
 
-                while IFS= read -r -d '' _file; do
-                    rm -f "$_file"{,.sig}
-                done < <(find "${REPO_OUT}" -type f -name "${_package}*.pkg.tar.zst" -print0)
+                # FIXME: This breaks gnome-icon-theme*
+                # while IFS= read -r -d '' _file; do
+                #     rm -f "$_file"{,.sig}
+                # done < <(find "${REPO_OUT}" -type f -name "${_package}*.pkg.tar.zst" -print0)
 
                 if [[ -z "${_pkgbuild}" ]]; then
                     log "info" "Building ${_package} from AUR."
