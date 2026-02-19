@@ -1,0 +1,1091 @@
+#!/bin/bash
+#
+# archlive - Build script for Arch-based live images
+#
+# Copyright (C) 2026 Caelestia Packager <packager@caelestiashell.com>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the “Software”), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT
+# OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+# THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+###############################################################################
+# Globals
+###############################################################################
+
+# The program basename.
+_ME="$(basename "${0}")"
+
+# The current version of the program.
+_VERSION="0.1.0"
+
+###############################################################################
+# Strict Mode
+###############################################################################
+
+# Treat unset variables and parameters other than the special parameters `@` or
+# `*` as an error when performing parameter expansion. An "unbound variable"
+# error will be written to STDERR and non-interactive shells will exit.
+#
+# This requires parameter expansion to test for unset variables.
+set -o nounset
+
+# Exit immediately if a pipeline returns non-zero.
+#
+# Note that this can cause issues with heredocs. If using `read -rd ''` with a
+# heredoc, the exit status is non-zero, even if there isn't actually an error.
+# `read -d ''` is synonymous with `read -d $'\@'`, which means read until a
+# NUL byte is found - if it reaches the end of the heredoc without finding a
+# NUL byte it exits with status `1` despite not actually erroring.
+#
+# To bypass this, use `<<HEREDOC || true:`
+#
+#    read -rd '' variable <<HEREDOC || true
+#    HEREDOC
+set -o errexit
+
+# Print a helpful message if a pipeline with non-zero exit code causes the
+# script to exit.
+trap 'log "error" "Aborting due to errexit on line ${LINENO}. Exit code: $?"' ERR
+
+# Allow the above trap to be inherited.
+set -o errtrace
+
+# Return value of a pipeline is the value of the last command to exit with a
+# non-zero status, or zero if all commands exit successfully.
+set -o pipefail
+
+# Set $IFS to only newline and tab.
+IFS=$'\n\t'
+
+###############################################################################
+# Load configs
+###############################################################################
+
+if [[ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/archliverc" ]]; then
+    cat << HEREDOC > "${XDG_CONFIG_HOME:-$HOME/.config}"/archliverc
+#!/bin/bash
+#
+# Config file for archlive
+#
+# Copyright (C) 2026 Caelestia Packager <packager@caelestiashell.com>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the \"Software\"), to
+# deal in the Software without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+# sell copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT
+# OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+# THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+# Path to the package repo. This is a pacman-compatible repository.
+REPO_OUT=./repo/archlive/x86_64
+
+# Name for the package repo. If this is a local build, this MUST be "custom".
+REPO_NAME=custom
+
+# Path to the build profile. If no profile is set, will use the
+# default Arch install image profile.
+BUILD_PROFILE=
+
+# Name for the ISO image.
+IMAGE_NAME=archlive
+
+# Path for built ISO files and related signature/verification files.
+ISO_OUT=./repo/iso
+
+# Path where PKGBUILD files are stored. Think of this as a local
+# version of the AUR, specifically for packages we care about.
+PKGBUILD_DIR=./build/packages
+
+# Path to the archroot used for building pretty much everything.
+CHROOT_DIR=./build/chroot
+
+# Path to a custom pacman.conf file for the archroot. Leave empty
+# to use the ArchLinux default.
+PACMAN_CONF=
+
+# The gpg key to use for signing packages and images. Leave empty
+# to skip signing.
+SIGNING_KEY=
+
+# Path to the directory used for temporary storage during the build
+# process. Ideally, this should be somewhere on tmpfs as the build
+# scripts currently only clean up when a new build is initiated.
+TMP_DIR=/tmp
+HEREDOC
+fi
+
+# shellcheck source=/dev/null
+source "${XDG_CONFIG_HOME:-$HOME/.config}"/archliverc
+
+REPO_OUT=${REPO_OUT:-./repo/archlive/x86_64}
+REPO_NAME=${REPO_NAME:-custom}
+BUILD_PROFILE=${BUILD_PROFILE:-/usr/share/archiso/configs/releng}
+IMAGE_NAME=${IMAGE_NAME:-archlive}
+ISO_OUT=${ISO_OUT:-./repo/iso}
+PKGBUILD_DIR=${PKGBUILD_DIR:-./build/packages}
+CHROOT_DIR=${CHROOT_DIR:-./build/chroot}
+PACMAN_CONF=${PACMAN_CONF:-}
+SIGNING_KEY=${SIGNING_KEY:-}
+TMP_DIR=${TMP_DIR:-/tmp}
+
+###############################################################################
+# Log Handler
+###############################################################################
+
+# Log severities per RFC 5424
+#
+# Code  Severity        Description
+#
+# 0     Emergency       System is unusable
+#                       - A panic condition
+# 1     Alert           Action must be taken immediately
+#                       - A condition that should be corrected immediately,
+#                         such as a corrupted database
+# 2     Critical        Critical conditions
+#                       - Device errors, etc
+# 3     Error           Error conditions
+# 4     Warning         Warning conditions
+# 5     Notice          Normal but significant conditions
+#                       - Conditions that are not errors, but may require
+#                         special handling
+# 6     Informational   Informational messages
+#                       - Confirmation that the program is working as expected
+# 7     Debug           Debug messages
+#                       - Messages that contain information normally of use
+#                         only when debugging a program
+
+function _log_exception() {
+    LOG_SYSLOG=0;
+
+    log 'error' "Logging Exception: ${*}"
+}
+
+function _debug() {
+    if ((${DEBUG:-0})); then
+        log "debug" "${*}"
+    fi
+}
+
+function log() {
+    local syslog="${LOG_SYSLOG:-1}";
+    local pid="${$}";
+
+    local level="${1}";
+    local upper;
+    upper="$(echo "${level}" | awk '{print toupper($0)}')";
+    local debug_level="${DEBUG:-0}";
+
+    shift 1;
+
+    local line="${*}";
+
+    local -A severities;
+    severities['DEBUG']=7;
+    severities['INFO']=6;
+    severities['NOTICE']=5;
+    severities['WARN']=4;
+    severities['ERROR']=3;
+    severities['CRIT']=2;   # Unused
+    severities['ALERT']=1;  # Unused
+    severities['EMERG']=0;  # Unused
+
+    local severity="${severities[${upper}]:-3}";
+
+    # Syslog logging
+    if [ "${debug_level}" -gt 0 ] || [ "${severity}" -lt 7 ]; then
+        if [ "${syslog}" -eq 1 ]; then
+            local syslog_line="${upper}: ${line}";
+
+            logger --id="${pid}" -t "archlive" -p "local0.${severity}" "${syslog_line}" || _log_exception "logger --id=\"${pid}\" -t \"archlive\" -p \"local0.${severity}\" \"${syslog_line}\"";
+        fi;
+    fi;
+
+    # Screen (pretty) logging
+    case "${level}" in
+        'debug')
+        (echo -e "\e[1;35m==> DEBUG:\e[1;37m ${line}\e[0m") >> /dev/stderr
+        ;;
+        'error')
+        (echo -e "\e[1;31m==> ERROR:\e[1;37m ${line}\e[0m") >> /dev/stderr
+        exit 1
+        ;;
+        'warn')
+        echo -e "\e[1;33m==> WARNING:\e[1;37m ${line}\e[0m"
+        ;;
+        'notice')
+        echo -e "\e[1;32m==>\e[1;37m ${line}\e[0m"
+        ;;
+        'info')
+        echo -e "\e[1;34m::\e[1;37m ${line}\e[0m"
+        ;;
+        *)
+        log 'error' "Undefined log level trying to log: ${*}"
+        ;;
+    esac
+}
+
+###############################################################################
+# Utility Functions
+###############################################################################
+
+# Check if a function exists
+#
+# Usage:
+#  _function_exists <name>
+#
+# Exit status:
+#  0 (success, true) - Function is defined in the current environment.
+#  1 (error, false)  - Function is not defined in the current environment.
+_function_exists() {
+    [ "$(type -t "${1}")" == 'function' ]
+}
+
+# Check if a command exists
+#
+# Usage:
+#  _command_exists <name>
+#
+# Exit status:
+#  0 (success, true) - Command is defined in the current environment.
+#  1 (error, false)  - Command is not defined in the current environment.
+_command_exists() {
+    hash "${1}" 2>/dev/null
+}
+
+# Check if an item exists in a list
+#
+# Usage:
+#  _contains <query> <list-item>...
+#
+# Exit status:
+#  0 (success, true) - Item is included in the list.
+#  1 (error, false)  - Item is not included in the list.
+_contains() {
+    local _query="${1:-}"
+    shift
+
+    if [[ -z "${_query}" ]] ||  [[ -z "${*:-}" ]]; then
+        return 1
+    fi
+
+    for __element in "${@}"; do
+        [[ "${__element}" == "${_query}" ]] && return 0
+    done
+
+    return 1
+}
+
+# Print a string containing all <list-item> arguments separated by
+# <delimiter>.
+#
+# Usage:
+#  _join <delimiter> <list-item>...
+_join() {
+    local _delimiter="${1}"
+
+    shift
+    printf "%s" "${1}"
+    shift
+    printf "%s" "${@/#/${_delimiter}}" | tr -d '[:space:]'
+}
+
+# Set or print a description for a specified subcommand or function.
+#
+# The <description> text can be passed as the second argument or as standard
+# input. To make the <description> text available to other functions,
+# `describe()` assigns the text to a variable with the format
+# `$___describe_<name>`.
+#
+# When the `--get` option is used, the description for <name> is printed, if
+# one has been set.
+#
+# Usage:
+#  describe <name> <description>
+#  describe --get <name>
+describe() {
+    [[ -z "${1:-}" ]] && log "error" "describe(): <name> required."
+
+    if [[ "${1}" == "--get" ]]; then
+        [[ -z "${2:-}" ]] && log "error" "describe(): <description> required."
+
+        local _name="${2:-}"
+        local _describe_var="___describe_${_name}"
+
+        if [[ -n "${!_describe_var:-}" ]]; then
+            printf "%s\\n" "${!_describe_var}"
+        else
+            printf "No additional information for \`%s\`\\n" "${_name}"
+        fi
+    else
+        if [[ -n "${2:-}" ]]; then
+            read -r -d '' "___describe_${1}" <<HEREDOC
+${2}
+HEREDOC
+        else
+            read -r -d '' "___describe_${1}" || true
+        fi
+    fi
+}
+
+###############################################################################
+# Option Parser
+###############################################################################
+
+# The `getopts` builtin only parses short options and `getopt` makes handling
+# subcommands complicated, so we're using custom option normalization and
+# parsing.
+
+# Normalize options
+#
+# Iterates over options and breaks `-ab` into `-a -b` and `--foo=bar` into
+# `--foo bar`. Also turns `--` into `--endopts` to avoid issues with things
+# like `-o-`, the `-` should not indicate the end of options, but be an invalid
+# option (or the argument to the option, such as `wget -qO-`).
+unset options
+
+while ((${#})); do
+    case "${1}" in
+        # If option is of type -ab
+        -[!-]?*)
+            # Loop over each character starting with the second
+            for ((i=1; i<${#1}; i++)); do
+                # Extract 1 character from position 'i'
+                c="${1:i:1}"
+                # Add to options
+                options+=("-${c}")
+            done
+            ;;
+        # If option is of type --foo=bar, split on first '='
+        --?*=*)
+            options+=("${1%%=*}" "${1#*=}")
+            ;;
+        # End of options, stop processing
+        --)
+            options+=(--endopts)
+            shift
+            options+=("${@}")
+            break
+            ;;
+        # Otherwise, no processing needed
+        *)
+            options+=("${1}")
+            ;;
+    esac
+
+    shift
+done
+
+# Set new positional parameters to altered options. Set default to blank.
+set -- "${options[@]:-}"
+unset options
+
+# Parse options
+
+_SUBCOMMAND=""
+_SUBCOMMAND_ARGUMENTS=()
+
+while ((${#})); do
+    __opt="${1}"
+
+    shift
+
+    case "${__opt}" in
+        -h|--help)
+            _SUBCOMMAND="help"
+            ;;
+        -v|--version)
+            _SUBCOMMAND="version"
+            ;;
+        *)
+            # The first non-option argument is assumed to be the subcommand
+            # name, subsequent arguments are added to $_SUBCOMMAND_ARGUMENTS.
+            if [[ -n "${_SUBCOMMAND}" ]]; then
+                _SUBCOMMAND_ARGUMENTS+=("${__opt}")
+            else
+                _SUBCOMMAND="${__opt}"
+            fi
+            ;;
+    esac
+done
+
+###############################################################################
+# Main Function
+###############################################################################
+
+# Declare the $_DEFINED_SUBCOMMANDS array.
+_DEFINED_SUBCOMMANDS=()
+
+# The primary function for starting the program.
+#
+# Must be called at the end of the program after all subcommands are defined.
+#
+# Usage:
+#  _main
+_main() {
+    # If $_SUBCOMMAND is blank, set it to `help`
+    if [[ -z "${_SUBCOMMAND}" ]]; then
+        _SUBCOMMAND="help"
+    fi
+
+    for __name in $(declare -F); do
+        # Each element has the format `declare -f function_name`, so set the
+        # name to only the `function_name` part of the string.
+        local _function_name
+        _function_name=$(printf "%s" "${__name}" | awk '{ print $3 }')
+
+        if ! { [[ -z "${_function_name:-}" ]] ||
+               [[ "${_function_name}" =~ ^_(.*) ]] ||
+               [[ "${_function_name}" == "bats_readlinkf" ]] ||
+               [[ "${_function_name}" == "describe" ]] ||
+               [[ "${_function_name}" == "shell_session_update" ]]
+        }; then
+            _DEFINED_SUBCOMMANDS+=("${_function_name}")
+        fi
+    done
+
+    # If the subcommand is defined, run it. Otherwise, return an error.
+    if _contains "${_SUBCOMMAND}" "${_DEFINED_SUBCOMMANDS[@]:-}"; then
+        ${_SUBCOMMAND} "${_SUBCOMMAND_ARGUMENTS[@]:-}"
+    else
+        log "error" "Unknown subcommand: ${_SUBCOMMAND}"
+    fi
+}
+
+###############################################################################
+# Subcommands
+###############################################################################
+
+# Help ########################################################################
+
+describe "help" <<HEREDOC
+Usage:
+  ${_ME} help [<subcommand>]
+
+Description:
+  Display help information for ${_ME} or a specified subcommand.
+HEREDOC
+
+help() {
+    if [[ "${1:-}" ]]; then
+        describe --get "${1}"
+    else
+        cat <<HEREDOC
+════════════════════════════════════════════════════════════
+ █████╗ ██████╗  ██████╗██╗  ██╗██╗     ██╗██╗   ██╗███████╗
+██╔══██╗██╔══██╗██╔════╝██║  ██║██║     ██║██║   ██║██╔════╝
+███████║██████╔╝██║     ███████║██║     ██║██║   ██║█████╗
+██╔══██║██╔══██╗██║     ██╔══██║██║     ██║╚██╗ ██╔╝██╔══╝
+██║  ██║██║  ██║╚██████╗██║  ██║███████╗██║ ╚████╔╝ ███████╗
+╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝  ╚══════╝
+═══════ Build script for ArchLinux-based live images ═══════
+
+Version: ${_VERSION}
+
+Usage:
+  ${_ME} <subcommand> [--subcommand-options] [<arguments>]
+  ${_ME} -h | --help
+  ${_ME} -v | --version
+
+Options:
+  -h --help     Display this help information.
+  -v --version  Display version information.
+
+Help:
+  ${_ME} help [<subcommand>]
+
+$(subcommands)
+HEREDOC
+    fi
+}
+
+# Subcommands #################################################################
+
+describe "subcommands" <<HEREDOC
+Usage:
+  ${_ME} subcommands
+
+Description:
+  Display the list of available subcommands.
+HEREDOC
+
+subcommands() {
+    printf "Available subcommands:\\n"
+    printf "  %s\\n" "${_DEFINED_SUBCOMMANDS[@]}"
+}
+
+# Version #####################################################################
+
+describe "version" <<HEREDOC
+Usage:
+  ${_ME} ( version | -v | --version )
+
+Description:
+  Display the current program version. Hint: it's ${_VERSION}.
+HEREDOC
+
+version() {
+    printf "ArchLive Version: %s\\n" "${_VERSION}"
+}
+
+# Archroot ######################################################################
+
+describe "archroot" <<HEREDOC
+Usage:
+  ${_ME} archroot [options]
+
+Options:
+  -b --build   Builds or rebuilds a clean archroot.
+  -u --update  Updates the current archroot.
+
+Description:
+  Build or manage the archroot used for building packages and images.
+HEREDOC
+
+archroot() {
+    local _build=0
+    local _update=0
+
+    for _argument in "${_SUBCOMMAND_ARGUMENTS[@]:-}"; do
+        case ${_argument} in
+            -b|--build)
+                _build=1
+                ;;
+            -u|--update)
+                _update=1
+                ;;
+            *)
+                help archroot
+                exit 1
+                ;;
+        esac
+    done
+
+    # Building and updating makes no sense, as by design a clean build is up to date.
+    [[ "${_build}" -eq 1 && "${_update}" -eq 1 ]] && _update=0
+
+    # Build a clean archroot.
+    if [[ "${_build}" -eq 1 ]]; then
+        # Ensure mkarchroot is available.
+        if ! _command_exists "mkarchroot"; then
+            log "error" "archroot(): Missing required dependency \"mkarchroot\", install \"devtools\"."
+        fi
+
+        log "notice" "Building a clean archroot..."
+
+        # Clean up old archroot if found.
+        if [ -d "${CHROOT_DIR}" ]; then
+            log "info" "Removing old archroot..."
+            if ! sudo rm -Rf "${CHROOT_DIR}"; then
+                log "error" "archroot(): Failed to remove old archroot at ${CHROOT_DIR}."
+            fi
+        fi
+
+        # Create the directory for the archroot.
+        if ! mkdir -p "${CHROOT_DIR}"; then
+            log "error" "archroot(): Failed to create archroot directory at ${CHROOT_DIR}."
+        fi
+
+        # Build the new archroot.
+        if [[ -z "${PACMAN_CONF}" ]]; then
+            if ! sudo mkarchroot "${CHROOT_DIR}"/root base-devel; then
+                log "error" "archroot(): Failed to build archroot at ${CHROOT_DIR}."
+            fi
+        else
+            if [[ ! -f "${PACMAN_CONF}" ]]; then
+                log "error" "archroot(): Specified pacman.conf file at ${PACMAN_CONF} not found."
+            fi
+
+            if ! sudo mkarchroot -C "${PACMAN_CONF}" "${CHROOT_DIR}"/root base-devel; then
+                log "error" "archroot(): Failed to build archroot at ${CHROOT_DIR}."
+            fi
+        fi
+    fi
+
+    if [[ "${_update}" -eq 1 ]]; then
+        # Ensure arch-nspawn exists.
+        if ! _command_exists "arch-nspawn"; then
+            log "error" "archroot(): Missing required dependency \"arch-nspawn\", install \"devtools\"."
+        fi
+
+        log "notice" "Updating the archroot at ${CHROOT_DIR}..."
+
+        if ! sudo arch-nspawn -C "${PACMAN_CONF}" "${CHROOT_DIR}"/root pacman -Sy archlinux-keyring; then
+            log "error" "archroot(): Failed to update the pacman keyring."
+        fi
+
+        if ! sudo arch-nspawn -C "${PACMAN_CONF}" "${CHROOT_DIR}"/root pacman -Syu; then
+            log "error" "archroot(): Failed to update the archroot at ${CHROOT_DIR}."
+        fi
+    fi
+}
+
+# Image #######################################################################
+
+describe "image" <<HEREDOC
+Usage:
+  ${_ME} image [options]
+
+Options:
+  -b --build   Builds a new ISO.
+  -d --deploy  Deploys the last-built ISO to the defined repository.
+  -s --sign    Signs the last-build ISO and generates checksums.
+  -u --update  Updates the archroot and all packages.
+
+Description:
+  Build, sign, or deploy a new live image.
+HEREDOC
+
+image() {
+    local _build=0
+    local _deploy=0
+    local _sign=0
+    local _update=0
+    local _date
+    _date=$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)
+
+    for _argument in "${@:-}"; do
+        case ${_argument} in
+            -b|--build)
+                _build=1
+                ;;
+            -d|--deploy)
+                _deploy=1
+                ;;
+            -s|--sign)
+                _sign=1
+                ;;
+            -u|--update)
+                _update=1
+                ;;
+            *)
+                help image
+                exit 1
+                ;;
+        esac
+    done
+
+    # Update all the things.
+    if [[ "${_update}" -gt 0 ]]; then
+        # Update the archroot.
+        archroot --update
+
+        # Update repo packages.
+        repo --update
+    fi
+
+    # Build the image.
+    if [[ "${_build}" -gt 0 ]]; then
+        log "notice" "Building a new ISO image..."
+
+        if [ -d "${TMP_DIR}"/archlive-iso ] || [ -d "${TMP_DIR}"/archlive-working ]; then
+            log "info" "Cleaning up build directory"
+
+            sudo rm -Rf "${TMP_DIR:?}"/archlive-{working,iso}/*
+        else
+            mkdir -p "${TMP_DIR}"/archlive-{working,iso}
+        fi
+
+        if ! sudo mkarchiso -v -r -w "${TMP_DIR}"/archlive-working -o "${TMP_DIR}"/archlive-iso "${BUILD_PROFILE}"; then
+            log "error" "image(): Failed to build ISO image!"
+        fi
+    fi
+
+    # Sign the image and generate checksums.
+    if [[ "${_sign}" -gt 0 ]]; then
+        # Ensure mkarchiso is available.
+        if ! _command_exists "mkarchiso"; then
+            log "error" "image(): Missing required dependency \"mkarchiso\", install \"archiso\"."
+        fi
+
+        if [[ -z "${SIGNING_KEY}" ]]; then
+            log "error" "image(): Sign called without a configured gpg key."
+        fi
+
+        cd "${TMP_DIR}"/archlive-iso || log "error" "image(): Failed to cd to ${TMP_DIR}/archlive-iso"
+
+        log "notice" "Signing ISO file..."
+
+        # Ensure the image exists.
+        local _image
+        _image=$(find . -type -f -name "*.iso")
+
+        if [[ -z "${_image}" ]]; then
+            log "error" "image(): No valid ISO image found."
+        fi
+
+        _image=$(basename "${_image}")
+
+        if ! gpg --local-user "0x${SIGNING_KEY}" --output "${_image}".sig --detach-sign "${_image}"; then
+            log "error" "image(): Failed to sign ISO file."
+        fi
+
+        log "notice" "Writing checksums..."
+
+        log "info" "Writing sha256sums."
+        if ! sha256sum "${_image}" >> sha256sums.txt; then
+            log "error" "image(): Failed to write sha256sums.txt."
+        fi
+
+        log "info" "Writing b2sums."
+        if ! b2sum "${_image}" >> b2sums.txt; then
+            log "error" "image(): Failed to write b2sums.txt."
+        fi
+    fi
+
+    # Deploy the image.
+    if [[ "${_deploy}" -gt 0 ]]; then
+        log "notice" "Deploying ISO image..."
+
+        if [ ! -d "${ISO_OUT}"/"${_date}" ]; then
+            mkdir -p "${ISO_OUT}"/"${_date}" || log "error" "image(): Failed to make directory at ${ISO_OUT}/${_date}"
+        fi
+
+        cd "${TMP_DIR}"/archlive-iso || log "error" "image(): Failed to cd to ${TMP_DIR}/archlive-iso"
+
+        log "info" "Moving ISO to ${ISO_OUT}/${_date}."
+        if ! rsync -av ./ "${ISO_OUT}"/"${_date}"/; then
+            log "error" "image(): Failed to move ISO to ${ISO_OUT}/${_date}."
+        fi
+    fi
+}
+
+# Repo ########################################################################
+
+describe "repo" <<HEREDOC
+Usage:
+  ${_ME} repo [options]
+
+Options:
+  -a --add <pkg>      Builds <pkg> and adds it to the defined repository.
+  -r --remove <pkg>   Removes <pkg> from the defined repository.
+  -u --update [pkg]   Updates [pkg] or the entire repository.
+HEREDOC
+
+repo() {
+    local _current=""
+    local _add=0
+    local _add_packages=()
+    local _remove=0
+    local _remove_packages=()
+    local _update=0
+    local _update_packages=()
+
+    for _argument in "${@:-}"; do
+        case ${_argument} in
+            -a|--add)
+                _current="add"
+                (( _add = _add + 1 ))
+                ;;
+            -r|--remove)
+                _current="remove"
+                (( _remove = _remove + 1 ))
+                ;;
+            -u|--update)
+                _current="update"
+                (( _update = _update + 1 ))
+                ;;
+            -*)
+                help repo
+                exit 1
+                ;;
+            *)
+                if [[ "${_current}" == "add" ]]; then
+                    _add_packages+=("${_argument}")
+                elif [[ "${_current}" == "rebuild" ]]; then
+                    _rebuild_packages+=("${_argument}")
+                elif [[ "${_current}" == "remove" ]]; then
+                    _remove_packages+=("${_argument}")
+                elif [[ "${_current}" == "update" ]]; then
+                    _update_packages+=("${_argument}")
+                else
+                    help repo
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    local _pkgbuild
+    local _package
+
+    # Ensure the archroot is up to date.
+    if ! _command_exists "arch-nspawn"; then
+        log "error" "repo(): Missing required dependency \"arch-nspawn\", install \"devtools\"."
+    fi
+
+    log "notice" "Updating the archroot at ${CHROOT_DIR}..."
+
+    if ! sudo arch-nspawn -C "${PACMAN_CONF}" "${CHROOT_DIR}"/root pacman -Syu; then
+        log "error" "repo(): Failed to update the archroot at ${CHROOT_DIR}."
+    fi
+
+    # Update packages in the repo.
+    if [[ "${_update}" -gt 0 ]]; then
+        # Ensure makechrootpkg is available.
+        if ! _command_exists "makechrootpkg"; then
+            log "error" "repo(): Missing required dependency \"makechrootpkg\", install \"devtools\"."
+        fi
+
+        # Setup to update all packages if none were specified.
+        if [[ "${#_update_packages[@]}" -eq 0 && ! $(find "${PKGBUILD_DIR}" -maxdepth 0 -empty) ]]; then
+            while IFS= read -r -d '' _package; do
+                _update_packages+=("$(basename "${_package}")")
+            done < <(find "${PKGBUILD_DIR}"/* -maxdepth 0 -type d -print0)
+        fi
+
+        # Ensure we actually have packages to update.
+        if [[ "${#_update_packages[@]}" -eq 0 ]]; then
+            log "warn" "repo(): Update called with an empty repository."
+        else
+            for _argument in "${_update_packages[@]:-}"; do
+                _package=""
+                _pkgbuild=""
+
+                # Ensure the package is actually in the repo.
+                if [[ -d "${PKGBUILD_DIR}"/"${_argument}" ]]; then
+                    _package="${_argument}"
+
+                    # Check for our .localbuild state file.
+                    if [[ -f "${PKGBUILD_DIR}"/"${_package}"/.localbuild ]]; then
+                        read -r _pkgbuild < "${PKGBUILD_DIR}"/"${_package}"/.localbuild
+                    fi
+                else
+                    # Redirect attempts to update a non-existent package to the --add function.
+                    log "error" "repo(): Stubbornly refusing to update non-existent package ${_argument}. Did you mean to run \`${_ME} repo --add ${_argument}\`?"
+                fi
+
+                # Sanity check - this should never happen.
+                if [[ -z "${_package}" ]]; then
+                    log "error" "repo(): An unknown error occurred, _package not set correctly."
+                fi
+
+                log "notice" "Updating package ${_package}..."
+
+                log "info" "Cleaning up old package files"
+
+                rm -Rf "${PKGBUILD_DIR:?}"/"${_package}"
+
+                while IFS= read -r -d '' _file; do
+                    rm -f "$_file"{,.sig}
+                done < <(find "${REPO_OUT}" -type f -name "${_package}*.pkg.tar.zst" -print0)
+
+                if [[ -z "${_pkgbuild}" ]]; then
+                    log "info" "Building ${_package} from AUR."
+
+                    # Attempt to clone the package from AUR if it isn't a valid local package.
+                    if ! git clone https://aur.archlinux.org/"${_package}".git "${PKGBUILD_DIR}"/"${_package}"; then
+                        log "error" "repo(): Failed to clone package ${_package} from AUR."
+                    fi
+                else
+                    log "info" "Building ${_package} from ${_pkgbuild%/*}."
+
+                    # Make the package directory.
+                    if ! mkdir -p "${PKGBUILD_DIR}"/"${_package}"; then
+                        log "error" "repo(): Failed to create package directory at ${PKGBUILD_DIR}/${_package}."
+                    fi
+
+                    # Sync local build files to the package directory.
+                    if ! rsync -avrz "${_pkgbuild%/*}"/* "${PKGBUILD_DIR}"/"${_package}"; then
+                        log "error" "repo(): Failed to copy package ${_package} from ${_pkgbuild}."
+                    fi
+
+                    # Add a tracking file so we can differentiate AUR from local builds for updates.
+                    realpath "${_pkgbuild}" > "${PKGBUILD_DIR}"/"${_package}"/.localbuild
+                fi
+
+                cd "${PKGBUILD_DIR}"/"${_package}" || log "error" "repo(): Failed to cd to ${PKGBUILD_DIR}/${_package}."
+
+                # Build the package.
+                if ! makechrootpkg -c -r "${CHROOT_DIR}"; then
+                    log "error" "repo(): Failed to build package ${_package}."
+                fi
+
+                log "info" "Copying package ${_package} to repository."
+
+                while IFS= read -r -d '' _file; do
+                    local _filename
+                    _filename=$(basename "${_file}")
+
+                    # Copy the built package to the repository.
+                    if ! rsync -avrz "${_file}" "${REPO_OUT}"; then
+                        log "error" "repo(): Failed to copy file ${_filename} to repository."
+                    fi
+
+                    if [[ -n "${SIGNING_KEY}" ]]; then
+                        # Sign the package.
+                        if ! gpg --local-user "0x${SIGNING_KEY}" --output "${REPO_OUT}"/"${_filename}".sig --detach-sig "${REPO_OUT}"/"${_filename}"; then
+                            log "error" "repo(): Failed to sign package file ${_filename}."
+                        fi
+
+                        # Add the package to the repository.
+                        if ! repo-add --remove --key "${SIGNING_KEY}" --verify --sign "${REPO_OUT}"/"${REPO_NAME}".db.tar.zst "${REPO_OUT}"/"${_filename}"; then
+                            log "error" "repo(): Failed to add package ${_package} to repository."
+                        fi
+                    else
+                        # Add the package to the repository.
+                        if ! repo-add --remove "${REPO_OUT}"/"${REPO_NAME}".db.tar.zst "${REPO_OUT}"/"${_filename}"; then
+                            log "error" "repo(): Failed to add package ${_package} to repository."
+                        fi
+                    fi
+                done < <(find "${PKGBUILD_DIR}"/"${_package}" -type f -name '*.pkg.tar.zst' ! -name '*debug*' -print0)
+            done
+        fi
+    fi
+
+    # Add packages to the repo.
+    if [[ "${_add}" -gt 0 ]]; then
+        # Ensure makechrootpkg is available.
+        if ! _command_exists "makechrootpkg"; then
+            log "error" "repo(): Missing required dependency \"makechrootpkg\", install \"devtools\"."
+        fi
+
+        if [[ "${#_add_packages[@]}" -eq 0 ]]; then
+            log "warn" "repo(): Add called without specifying a package to add."
+        else
+            for _argument in "${_add_packages[@]:-}"; do
+                # If passed the path to a directory containing a PKGBUILD.
+                if [[ -d "${_argument}" && -f "${_argument}"/PKGBUILD ]]; then
+                    _pkgbuild="${_argument}/PKGBUILD"
+                    _package=$(grep "^pkgname=" "${_pkgbuild}" | cut -d"=" -f2- | tr -d '"' | tr -d "'")
+                # If passed the path to a PKGBUILD.
+                elif [[ -f "${_argument}" && "${_argument}" =~ PKGBUILD$ ]]; then
+                    _pkgbuild="${_argument}"
+                    _package=$(grep "^pkgname=" "${_pkgbuild}" | cut -d"=" -f2- | tr -d '"' | tr -d "'")
+                # If passed a package name.
+                else
+                    _pkgbuild=""
+                    _package="${_argument}"
+                fi
+
+                # Redirect attempts to re-add a package to the --update function.
+                if [[ -d "${PKGBUILD_DIR}"/"${_package}" ]]; then
+                    log "error" "repo(): Stubbornly refusing to add pre-existing package ${_package}. Did you mean to run \`${_ME} repo --update ${_package}\`?"
+                fi
+
+                log "notice" "Adding package ${_package} to the repo..."
+
+                if [[ -n "${_pkgbuild}" && -n "${_package}" ]]; then
+                    log "info" "Building ${_package} from ${_pkgbuild}."
+
+                    # Make the package directory.
+                    if ! mkdir -p "${PKGBUILD_DIR}"/"${_package}"; then
+                        log "error" "repo(): Failed to create package directory at ${PKGBUILD_DIR}/${_package}."
+                    fi
+
+                    # Sync local build files to the package directory.
+                    if ! rsync -avrz "${_pkgbuild%/*}"/* "${PKGBUILD_DIR}"/"${_package}"; then
+                        log "error" "repo(): Failed to copy package ${_package} from ${_pkgbuild}."
+                    fi
+
+                    # Add a tracking file so we can differentiate AUR from local builds for updates.
+                    realpath "${_pkgbuild}" > "${PKGBUILD_DIR}"/"${_package}"/.localbuild
+                else
+                    log "info" "Building ${_package} from AUR."
+
+                    # Attempt to clone the package from AUR if it isn't a valid local package.
+                    if ! git clone https://aur.archlinux.org/"${_package}".git "${PKGBUILD_DIR}"/"${_package}"; then
+                        log "error" "repo(): Failed to clone package ${_package} from AUR."
+                    fi
+                fi
+
+                cd "${PKGBUILD_DIR}"/"${_package}" || log "error" "repo(): Failed to cd to ${PKGBUILD_DIR}/${_package}."
+
+                # Build the package.
+                if ! makechrootpkg -c -r "${CHROOT_DIR}"; then
+                    log "error" "repo(): Failed to build package ${_package}."
+                fi
+
+                log "info" "Copying package ${_package} to repository."
+
+                if [ ! -d "${REPO_OUT}" ]; then
+                    if ! mkdir -p "${REPO_OUT}"; then
+                        log "error" "repo(): Failed to create repository at ${REPO_OUT}."
+                    fi
+                fi
+
+                while IFS= read -r -d '' _file; do
+                    local _filename
+                    _filename=$(basename "${_file}")
+
+                    # Copy the built package to the repository.
+                    if ! rsync -avrz "${_file}" "${REPO_OUT}"; then
+                        log "error" "repo(): Failed to copy file ${_filename} to repository."
+                    fi
+
+                    if [[ -n "${SIGNING_KEY}" ]]; then
+                        # Sign the package.
+                        if ! gpg --local-user "0x${SIGNING_KEY}" --output "${REPO_OUT}"/"${_filename}".sig --detach-sig "${REPO_OUT}"/"${_filename}"; then
+                            log "error" "repo(): Failed to sign package file ${_filename}."
+                        fi
+
+                        # Add the package to the repository.
+                        if ! repo-add --remove --key "${SIGNING_KEY}" --verify --sign "${REPO_OUT}"/"${REPO_NAME}".db.tar.zst "${REPO_OUT}"/"${_filename}"; then
+                            log "error" "repo(): Failed to add package ${_package} to repository."
+                        fi
+                    else
+                        # Add the package to the repository.
+                        if ! repo-add --remove "${REPO_OUT}"/"${REPO_NAME}".db.tar.zst "${REPO_OUT}"/"${_filename}"; then
+                            log "error" "repo(): Failed to add package ${_package} to repository."
+                        fi
+                    fi
+                done < <(find "${PKGBUILD_DIR}"/"${_package}" -type f -name '*.pkg.tar.zst' ! -name '*debug*' -print0)
+            done
+        fi
+    fi
+
+    # Remove packages from the repo.
+    if [[ "${_remove}" -gt 0 ]]; then
+        # Ensure we actually have a package to remove.
+        if [[ "${#_remove_packages[@]}" -eq 0 ]]; then
+            log "warn" "repo(): Remove called without specifying a package to remove."
+        else
+            for _argument in "${_remove_packages[@]:-}"; do
+                if [[ -n "${SIGNING_KEY}" ]]; then
+                    if ! repo-remove --key "${SIGNING_KEY}" --verify --sign "${REPO_OUT}"/"${REPO_NAME}".db.tar.zst "${_argument}"; then
+                        log "warn" "repo(): Failed to remove package ${_argument} from repository"
+                    fi
+                else
+                    if ! repo-remove "${REPO_OUT}"/"${REPO_NAME}".db.tar.zst "${_argument}"; then
+                        log "warn" "repo(): Failed to remove package ${_argument} from repository"
+                    fi
+                fi
+
+                rm -f "${REPO_OUT}"/"${_argument}"{,.sig}
+                rm -Rf "${PKGBUILD_DIR:?}"/"${_argument}"
+            done
+        fi
+    fi
+}
+
+###############################################################################
+# Run Program
+###############################################################################
+
+# Call the `_main` function after everything has been defined.
+_main
