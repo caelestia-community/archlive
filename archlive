@@ -733,7 +733,7 @@ image() {
 
         # Ensure the image exists.
         local _image
-        _image=$(find . -type -f -name "*.iso")
+        _image=$(find . -type f -name "*.iso")
 
         if [[ -z "${_image}" ]]; then
             log "error" "image(): No valid ISO image found."
