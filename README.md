@@ -117,3 +117,11 @@ an annoyance. The currently known issues are outlined below.
 * If a build fails, the script currently doesn't clean up after itself well.
   This doesn't impact much of anything other than a rebuild has to be run
   as an update instead of a new build.
+* Locally-sourced packages don't currently honor variable expansion in package
+  names. If a PKGBUILD defined `_pkgname=whatever`, then uses that variable in
+  the actual `pkgname` field, e.g.: `pkgname=$_pkgname-git`, the script trips
+  over the variable and tries to add a package literally called "$_pkgname-git"
+  instead of "whatever-git". I'm not sure how to address this at the moment,
+  but since it only applies to local packages and local packages are under our
+  direct control, it's easy to bypass by simply editing the `pkgname` field in
+  the PKGBUILD.
