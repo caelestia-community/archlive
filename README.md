@@ -125,3 +125,6 @@ an annoyance. The currently known issues are outlined below.
   but since it only applies to local packages and local packages are under our
   direct control, it's easy to bypass by simply editing the `pkgname` field in
   the PKGBUILD.
+* The build script currently tries to double-build if you pass it the path to
+  a local PKGBUILD file. It builds once correctly using the local PKGBUILD,
+  then tries to build a package using the path passed as the package name.
