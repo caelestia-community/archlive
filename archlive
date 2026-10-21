@@ -934,7 +934,7 @@ repo() {
                     _filename=$(basename "${_file}")
 
                     # Copy the built package to the repository.
-                    if ! rsync -avrz "${_file}" "${REPO_OUT}"; then
+                    if ! rsync -avz "${_file}" "${REPO_OUT}"; then
                         log "error" "repo(): Failed to copy file ${_filename} to repository."
                     fi
 
