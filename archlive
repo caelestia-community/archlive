@@ -938,6 +938,7 @@ repo() {
                         log "error" "repo(): Failed to copy file ${_filename} to repository."
                     fi
 
+                    log "info" "repo(): Signing ${_filename}."
                     if [[ -n "${SIGNING_KEY}" ]]; then
                         # Sign the package.
                         if ! gpg --local-user "0x${SIGNING_KEY}" --output "${REPO_OUT}"/"${_filename}".sig --detach-sig "${REPO_OUT}"/"${_filename}"; then
