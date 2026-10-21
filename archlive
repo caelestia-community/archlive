@@ -741,7 +741,7 @@ image() {
 
         _image=$(basename "${_image}")
 
-        if ! gpg --local-user "0x${SIGNING_KEY}" --output "${_image}".sig --detach-sign "${_image}"; then
+        if ! gpg --yes --local-user "0x${SIGNING_KEY}" --output "${_image}".sig --detach-sign "${_image}"; then
             log "error" "image(): Failed to sign ISO file."
         fi
 
@@ -938,10 +938,11 @@ repo() {
                         log "error" "repo(): Failed to copy file ${_filename} to repository."
                     fi
 
-                    log "info" "repo(): Signing ${_filename}."
                     if [[ -n "${SIGNING_KEY}" ]]; then
+                        log "info" "repo(): Signing ${_filename}."
+
                         # Sign the package.
-                        if ! gpg --local-user "0x${SIGNING_KEY}" --output "${REPO_OUT}"/"${_filename}".sig --detach-sig "${REPO_OUT}"/"${_filename}"; then
+                        if ! gpg --yes --local-user "0x${SIGNING_KEY}" --output "${REPO_OUT}"/"${_filename}".sig --detach-sig "${REPO_OUT}"/"${_filename}"; then
                             log "error" "repo(): Failed to sign package file ${_filename}."
                         fi
 
@@ -1041,8 +1042,10 @@ repo() {
                     fi
 
                     if [[ -n "${SIGNING_KEY}" ]]; then
+                        log "info" "repo(): Signing ${_filename}."
+
                         # Sign the package.
-                        if ! gpg --local-user "0x${SIGNING_KEY}" --output "${REPO_OUT}"/"${_filename}".sig --detach-sig "${REPO_OUT}"/"${_filename}"; then
+                        if ! gpg --yes --local-user "0x${SIGNING_KEY}" --output "${REPO_OUT}"/"${_filename}".sig --detach-sig "${REPO_OUT}"/"${_filename}"; then
                             log "error" "repo(): Failed to sign package file ${_filename}."
                         fi
 
