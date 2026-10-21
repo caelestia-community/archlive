@@ -769,7 +769,7 @@ image() {
         cd "${TMP_DIR}"/archlive-iso || log "error" "image(): Failed to cd to ${TMP_DIR}/archlive-iso"
 
         log "info" "Moving ISO to ${ISO_OUT}/${_date}."
-        if ! rsync -av ./ "${ISO_OUT}"/"${_date}"/; then
+        if ! rsync -avz ./ "${ISO_OUT}"/"${_date}"/; then
             log "error" "image(): Failed to move ISO to ${ISO_OUT}/${_date}."
         fi
     fi
@@ -912,7 +912,7 @@ repo() {
                     fi
 
                     # Sync local build files to the package directory.
-                    if ! rsync -avrz "${_pkgbuild%/*}"/* "${PKGBUILD_DIR}"/"${_package}"; then
+                    if ! rsync -avz "${_pkgbuild%/*}"/* "${PKGBUILD_DIR}"/"${_package}"; then
                         log "error" "repo(): Failed to copy package ${_package} from ${_pkgbuild}."
                     fi
 
@@ -1000,7 +1000,7 @@ repo() {
                     fi
 
                     # Sync local build files to the package directory.
-                    if ! rsync -avrz "${_pkgbuild%/*}"/* "${PKGBUILD_DIR}"/"${_package}"; then
+                    if ! rsync -avz "${_pkgbuild%/*}"/* "${PKGBUILD_DIR}"/"${_package}"; then
                         log "error" "repo(): Failed to copy package ${_package} from ${_pkgbuild}."
                     fi
 
@@ -1035,7 +1035,7 @@ repo() {
                     _filename=$(basename "${_file}")
 
                     # Copy the built package to the repository.
-                    if ! rsync -avrz "${_file}" "${REPO_OUT}"; then
+                    if ! rsync -avz "${_file}" "${REPO_OUT}"; then
                         log "error" "repo(): Failed to copy file ${_filename} to repository."
                     fi
 
